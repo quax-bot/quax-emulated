@@ -1,0 +1,221 @@
+name: emulator
+run-name: ${{ inputs.flow && 'Given flow' || inputs.flows }} on ${{ inputs.repository }}@${{ inputs.ref }}
+
+# Builds QuaX from any ref of any repository, then runs Maestro flows on an Android emulator against
+# the mock of X (tool/mock_x in QuaX), recording a video of each. The APK, Maestro and a booted
+# emulator are cached, and each cache is saved as soon as it is built, so that a run whose flows
+# fail still fills them for the next one.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Repository of QuaX to test, e.g. a fork
+        default: Teskann/QuaX
+      ref:
+        description: Branch, tag or commit to test
+        default: master
+      flows:
+        description: Folder or .yaml flow to run, in the repository tested
+        default: .maestro
+      flow:
+        description: YAML of a single flow, run instead of the flows above (multiline through the API)
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  MAESTRO_VERSION: 2.10.0
+  MAESTRO_CLI_NO_ANALYTICS: true
+
+jobs:
+  emulator:
+    name: Run the flows on an emulator
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Clone QuaX
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          # The code built next comes from any ref, and nothing needs git afterwards
+          persist-credentials: false
+
+      - name: Check that the ref can run on the emulator
+        run: |
+          missing=$(for file in tool/mock_x/emulator_qa.dart android/app/src/profile/AndroidManifest.xml; do
+            [ -f "$file" ] || printf '%s ' "$file"
+          done)
+          if [ -n "$missing" ] || ! grep -q usesCleartextTraffic android/app/src/profile/AndroidManifest.xml; then
+            echo "::error::$REPOSITORY@$REF cannot run on the emulator: it needs tool/mock_x/emulator_qa.dart and a profile manifest that allows plain HTTP (android/app/src/profile/AndroidManifest.xml). Missing: ${missing:-usesCleartextTraffic}"
+            exit 1
+          fi
+          echo "SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+        env:
+          REPOSITORY: ${{ inputs.repository }}
+          REF: ${{ inputs.ref }}
+
+      - name: Choose the flows
+        run: |
+          if [ -n "$FLOW" ]; then
+            mkdir -p "$RUNNER_TEMP/flows"
+            printf '%s\n' "$FLOW" > "$RUNNER_TEMP/flows/flow.yaml"
+            echo "FLOWS=$RUNNER_TEMP/flows" >> "$GITHUB_ENV"
+          elif [ -e "$FLOWS" ]; then
+            echo "FLOWS=$FLOWS" >> "$GITHUB_ENV"
+          else
+            echo "::error::$FLOWS does not exist in the repository tested"
+            exit 1
+          fi
+        env:
+          FLOW: ${{ inputs.flow }}
+          FLOWS: ${{ inputs.flows }}
+
+      - name: Install and set up Java
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: 'zulu'
+          java-version: '25.x'
+          cache: gradle
+
+      - name: Install and set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version-file: .fvmrc
+          cache: true
+
+      - name: Restore the APK
+        id: apk
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: apk
+          # Bump the version when the build below changes
+          key: apk-v1-${{ inputs.repository }}-${{ env.SHA }}
+
+      - name: Generate icons
+        if: steps.apk.outputs.cache-hit != 'true'
+        uses: ./.github/actions/generate-icons
+
+      # A profile build, as smooth as a release one
+      - name: Build a profile APK that talks to the mock of X
+        if: steps.apk.outputs.cache-hit != 'true'
+        run: |
+          flutter config --no-analytics
+          flutter pub get
+          dart run flutter_launcher_icons
+          dart run dart_pubspec_licenses:generate
+          dart run intl_utils:generate
+          dart run flutter_iconpicker:generate_packs --packs material
+          flutter build apk --profile --no-tree-shake-icons --target-platform android-x64 \
+            --dart-define=QUAX_MOCK_X=http://localhost:8787
+          mkdir -p apk
+          cp build/app/outputs/flutter-apk/app-profile.apk apk/
+
+      - name: Save the APK
+        if: steps.apk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: apk
+          key: ${{ steps.apk.outputs.cache-primary-key }}
+
+      - name: Restore Maestro
+        id: maestro
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/maestro-cli
+          key: maestro-${{ env.MAESTRO_VERSION }}
+
+      - name: Install Maestro
+        if: steps.maestro.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/maestro.zip" \
+            "https://github.com/mobile-dev-inc/maestro/releases/download/cli-$MAESTRO_VERSION/maestro.zip"
+          unzip -q "$RUNNER_TEMP/maestro.zip" -d "$RUNNER_TEMP"
+          mv "$RUNNER_TEMP/maestro" ~/maestro-cli
+
+      - name: Save Maestro
+        if: steps.maestro.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/maestro-cli
+          key: ${{ steps.maestro.outputs.cache-primary-key }}
+
+      - name: Put Maestro on the path
+        run: echo "$HOME/maestro-cli/bin" >> "$GITHUB_PATH"
+
+      # Cuts the still start of the videos
+      - name: Install ffmpeg
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
+
+      # The mock of X runs inside the script, which needs the packages of QuaX
+      - name: Get the packages of QuaX
+        if: steps.apk.outputs.cache-hit == 'true'
+        run: flutter pub get
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # The emulator runner installs the latest emulator, which may not load a snapshot made by an older one
+      - name: Install the latest emulator
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install emulator > /dev/null
+          version=$("$ANDROID_HOME/emulator/emulator" -version | head -1 | grep -o '[0-9.]*' | head -1)
+          echo "EMULATOR_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Restore the emulator snapshot
+        id: avd
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-34-google_apis-x86_64-pixel_6-${{ env.EMULATOR_VERSION }}
+
+      - name: Create the emulator snapshot
+        if: steps.avd.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          script: echo "Created the emulator snapshot"
+
+      - name: Save the emulator snapshot
+        if: steps.avd.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: ${{ steps.avd.outputs.cache-primary-key }}
+
+      - name: Run the flows
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          script: dart run tool/mock_x/emulator_qa.dart apk/app-profile.apk "$FLOWS" emulator-output
+
+      - name: Archive the videos and logs
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: emulator-output
+          path: emulator-output
+          # Maestro writes its screenshots and logs in a .maestro folder
+          include-hidden-files: true
