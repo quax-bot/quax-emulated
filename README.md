@@ -8,12 +8,13 @@ The `emulator` workflow builds QuaX at any ref, then runs
 `tool/mock_x/emulator_qa.dart`. The `emulator-output` artefact holds the
 videos, Maestro's screenshots and logs, the logcat and the mock's log.
 
-| Input        | Default        |                                            |
-|--------------|----------------|--------------------------------------------|
-| `repository` | `Teskann/QuaX` | Repository to test, e.g. a fork            |
-| `ref`        | `master`       | Branch, tag or commit                      |
-| `flows`      | `.maestro`     | Folder or `.yaml` flow, in that repository |
-| `flow`       |                | YAML of one flow, run instead of `flows`   |
+| Input        | Default        |                                               |
+| ------------ | -------------- | --------------------------------------------- |
+| `repository` | `Teskann/QuaX` | Repository to test, e.g. a fork               |
+| `ref`        | `master`       | Branch, tag or commit                         |
+| `flows`      | `.maestro`     | Folder or `.yaml` flow, in that repository    |
+| `flow`       |                | YAML of one flow, run instead of `flows`      |
+| `patch`      |                | Diff applied on top of `ref` before the build |
 
 The ref must have `tool/mock_x/emulator_qa.dart` and a profile manifest that
 allows plain HTTP.
@@ -30,6 +31,18 @@ takes the whole file:
 ```bash
 gh workflow run emulator.yml -R quax-bot/quax-emulated -f ref=master -F flow=@repro.yaml
 ```
+
+Test a change without pushing it: pass a diff from upstream `master`, applied
+before the build. It can change the code as well as add flows:
+
+```bash
+git diff upstream/master > change.patch
+gh workflow run emulator.yml -R quax-bot/quax-emulated -F patch=@change.patch
+```
+
+The patch must apply on `ref` (`master` by default) and be text only: binary
+files, such as images, are not supported. GitHub caps all the inputs of a run
+at 65,535 characters.
 
 For a before/after video, run the same `flow` on the base branch and on the fix.
 

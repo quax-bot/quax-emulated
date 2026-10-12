@@ -1,5 +1,5 @@
 name: emulator
-run-name: ${{ inputs.flow && 'Given flow' || inputs.flows }} on ${{ inputs.repository }}@${{ inputs.ref }}
+run-name: ${{ inputs.flow && 'Given flow' || inputs.flows }} on ${{ inputs.repository }}@${{ inputs.ref }}${{ inputs.patch && ' + patch' || '' }}
 
 # Builds QuaX from any ref of any repository, then runs Maestro flows on an Android emulator against
 # the mock of X (tool/mock_x in QuaX), recording a video of each. The APK, Maestro and a booted
@@ -20,6 +20,10 @@ on:
         default: .maestro
       flow:
         description: YAML of a single flow, run instead of the flows above (multiline through the API)
+        required: false
+        default: ''
+      patch:
+        description: Diff applied on top of the ref before building, e.g. from git diff upstream/master (multiline through the API)
         required: false
         default: ''
 
@@ -44,6 +48,21 @@ jobs:
           # The code built next comes from any ref, and nothing needs git afterwards
           persist-credentials: false
 
+      # Tests a change without pushing it anywhere
+      - name: Apply the patch
+        if: inputs.patch != ''
+        run: |
+          printf '%s\n' "$PATCH" > "$RUNNER_TEMP/change.patch"
+          if ! git apply --index --whitespace=nowarn "$RUNNER_TEMP/change.patch"; then
+            echo "::error::The patch does not apply on $REPOSITORY@$REF"
+            exit 1
+          fi
+          git diff --cached --stat
+        env:
+          PATCH: ${{ inputs.patch }}
+          REPOSITORY: ${{ inputs.repository }}
+          REF: ${{ inputs.ref }}
+
       - name: Check that the ref can run on the emulator
         run: |
           missing=$(for file in tool/mock_x/emulator_qa.dart android/app/src/profile/AndroidManifest.xml; do
@@ -53,7 +72,12 @@ jobs:
             echo "::error::$REPOSITORY@$REF cannot run on the emulator: it needs tool/mock_x/emulator_qa.dart and a profile manifest that allows plain HTTP (android/app/src/profile/AndroidManifest.xml). Missing: ${missing:-usesCleartextTraffic}"
             exit 1
           fi
-          echo "SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          # A patched build is cached under the commit and the hash of the patch
+          sha=$(git rev-parse HEAD)
+          if [ -f "$RUNNER_TEMP/change.patch" ]; then
+            sha="$sha-$(sha256sum "$RUNNER_TEMP/change.patch" | cut -c1-16)"
+          fi
+          echo "SHA=$sha" >> "$GITHUB_ENV"
         env:
           REPOSITORY: ${{ inputs.repository }}
           REF: ${{ inputs.ref }}
