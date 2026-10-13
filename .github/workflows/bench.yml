@@ -153,6 +153,12 @@ jobs:
       - name: Install the latest emulator
         run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install emulator > /dev/null'
 
+      # The cut re-encodes the video, which may change its frames: the raw recording is measured
+      - name: Keep the raw recording
+        run: |
+          grep -q 'await _cutStart(video);' tool/mock_x/emulator_qa.dart
+          sed -i 's|await _cutStart(video);|// not cut for the benchmark|' tool/mock_x/emulator_qa.dart
+
       - name: Record with the emulator
         if: matrix.recording == 'host'
         run: python3 emulated/bench/host_recording.py tool/mock_x/emulator_qa.dart
