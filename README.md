@@ -15,6 +15,7 @@ videos, Maestro's screenshots and logs, the logcat and the mock's log.
 | `flows`      | `.maestro`     | Folder or `.yaml` flow, in that repository    |
 | `flow`       |                | YAML of one flow, run instead of `flows`      |
 | `patch`      |                | Diff applied on top of `ref` before the build |
+| `api-level`  | `36`           | Android API level of the emulator             |
 
 The ref must have `tool/mock_x/emulator_qa.dart` and a profile manifest that
 allows plain HTTP.

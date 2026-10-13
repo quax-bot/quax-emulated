@@ -26,6 +26,10 @@ on:
         description: Diff applied on top of the ref before building, e.g. from git diff upstream/master (multiline through the API)
         required: false
         default: ''
+      api-level:
+        description: Android API level of the emulator, as in sdkmanager's system-images;android-<level> (e.g. 34 for Android 14)
+        required: false
+        default: '36'
 
 permissions:
   contents: read
@@ -199,13 +203,13 @@ jobs:
           path: |
             ~/.android/avd/*
             ~/.android/adb*
-          key: avd-34-google_apis-x86_64-pixel_6-${{ env.EMULATOR_VERSION }}
+          key: avd-${{ inputs.api-level }}-google_apis-x86_64-pixel_6-${{ env.EMULATOR_VERSION }}
 
       - name: Create the emulator snapshot
         if: steps.avd.outputs.cache-hit != 'true'
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
-          api-level: 34
+          api-level: ${{ inputs.api-level }}
           target: google_apis
           arch: x86_64
           profile: pixel_6
@@ -226,7 +230,7 @@ jobs:
       - name: Run the flows
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
-          api-level: 34
+          api-level: ${{ inputs.api-level }}
           target: google_apis
           arch: x86_64
           profile: pixel_6
