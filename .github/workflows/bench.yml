@@ -1,0 +1,181 @@
+name: bench
+run-name: Video smoothness benchmark
+
+# Temporary: compares how smooth the videos of a flow are with more emulator cores, a smaller screen and a
+# recording made by the emulator rather than inside Android. Every variant boots cold from a new AVD, so that
+# none is helped by a snapshot.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  QUAX_SHA: 1bcfbe6cc94c81ae335e270461e8d62580eed5d7
+  MAESTRO_VERSION: 2.10.0
+  MAESTRO_CLI_NO_ANALYTICS: true
+  FLOW: .maestro/browse_profile.yaml
+
+jobs:
+  apk:
+    name: Build the APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: Teskann/QuaX
+          ref: ${{ env.QUAX_SHA }}
+          persist-credentials: false
+
+      - name: Restore the APK
+        id: apk
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: apk
+          key: apk-v1-Teskann/QuaX-${{ env.QUAX_SHA }}
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        if: steps.apk.outputs.cache-hit != 'true'
+        with:
+          distribution: 'zulu'
+          java-version: '25.x'
+          cache: gradle
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        if: steps.apk.outputs.cache-hit != 'true'
+        with:
+          flutter-version-file: .fvmrc
+          cache: true
+
+      - name: Generate icons
+        if: steps.apk.outputs.cache-hit != 'true'
+        uses: ./.github/actions/generate-icons
+
+      - name: Build
+        if: steps.apk.outputs.cache-hit != 'true'
+        run: |
+          flutter config --no-analytics
+          flutter pub get
+          dart run flutter_launcher_icons
+          dart run dart_pubspec_licenses:generate
+          dart run intl_utils:generate
+          dart run flutter_iconpicker:generate_packs --packs material
+          flutter build apk --profile --no-tree-shake-icons --target-platform android-x64 \
+            --dart-define=QUAX_MOCK_X=http://localhost:8787
+          mkdir -p apk
+          cp build/app/outputs/flutter-apk/app-profile.apk apk/
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: apk
+          path: apk
+
+  run:
+    name: ${{ matrix.variant }} (${{ matrix.rep }})
+    needs: apk
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        rep: [1, 2]
+        variant: [base, cores4, small, small-cores4, host, host-small-cores4]
+        include:
+          - { variant: base, cores: 2, size: '', recording: guest }
+          - { variant: cores4, cores: 4, size: '', recording: guest }
+          - { variant: small, cores: 2, size: 720x1600, recording: guest }
+          - { variant: small-cores4, cores: 4, size: 720x1600, recording: guest }
+          - { variant: host, cores: 2, size: '', recording: host }
+          - { variant: host-small-cores4, cores: 4, size: 720x1600, recording: host }
+    env:
+      SIZE: ${{ matrix.size }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: Teskann/QuaX
+          ref: ${{ env.QUAX_SHA }}
+          persist-credentials: false
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          path: emulated
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: apk
+          path: apk
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: 'zulu'
+          java-version: '25.x'
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version-file: .fvmrc
+          cache: true
+
+      - name: Get the packages of QuaX
+        run: flutter pub get
+
+      - name: Restore Maestro
+        id: maestro
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/maestro-cli
+          key: maestro-${{ env.MAESTRO_VERSION }}
+
+      - name: Install Maestro
+        if: steps.maestro.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/maestro.zip" \
+            "https://github.com/mobile-dev-inc/maestro/releases/download/cli-$MAESTRO_VERSION/maestro.zip"
+          unzip -q "$RUNNER_TEMP/maestro.zip" -d "$RUNNER_TEMP"
+          mv "$RUNNER_TEMP/maestro" ~/maestro-cli
+
+      - run: echo "$HOME/maestro-cli/bin" >> "$GITHUB_PATH"
+
+      - run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install the latest emulator
+        run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install emulator > /dev/null'
+
+      - name: Record with the emulator
+        if: matrix.recording == 'host'
+        run: python3 emulated/bench/host_recording.py tool/mock_x/emulator_qa.dart
+
+      - name: Run the flow
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          cores: ${{ matrix.cores }}
+          force-avd-creation: true
+          emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none ${{ matrix.size && format('-skin {0}', matrix.size) || '' }}
+          disable-animations: false
+          script: |
+            if [ -n "$SIZE" ]; then adb shell wm density 280; fi
+            adb shell wm size; adb shell wm density; adb shell nproc
+            dart run tool/mock_x/emulator_qa.dart apk/app-profile.apk "$FLOW" emulator-output || true
+
+      - name: Measure
+        if: always()
+        run: python3 emulated/bench/measure.py emulator-output "${{ matrix.variant }}-${{ matrix.rep }}"
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: always()
+        with:
+          name: bench-${{ matrix.variant }}-${{ matrix.rep }}
+          path: emulator-output
+          include-hidden-files: true
