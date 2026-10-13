@@ -7,6 +7,10 @@ run-name: Video smoothness benchmark
 
 on:
   workflow_dispatch:
+  # A workflow missing from master cannot be dispatched
+  push:
+    branches: [ccr-0204e0ca-yd9zu5]
+    paths: [bench/**, .github/workflows/bench.yml]
 
 permissions:
   contents: read
