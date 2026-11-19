@@ -30,6 +30,22 @@ on:
         description: Android API level of the emulator, as in sdkmanager's system-images;android-<level> (e.g. 34 for Android 14)
         required: false
         default: '36'
+      profile:
+        description: Device profile of the emulator, as listed by avdmanager list device (sets its screen)
+        required: false
+        default: pixel_6
+      cores:
+        description: CPU cores of the emulator
+        required: false
+        default: '2'
+      gpu:
+        description: Rendering mode of the emulator, as in its -gpu option
+        required: false
+        default: swiftshader_indirect
+      screenrecord:
+        description: Options of screenrecord for the videos
+        required: false
+        default: --bit-rate 8000000
 
 permissions:
   contents: read
@@ -204,7 +220,7 @@ jobs:
           path: |
             ~/.android/avd/*
             ~/.android/adb*
-          key: avd-${{ inputs.api-level }}-google_apis-x86_64-pixel_6-${{ env.EMULATOR_VERSION }}
+          key: avd-${{ inputs.api-level }}-google_apis-x86_64-${{ inputs.profile }}-${{ inputs.cores }}-${{ inputs.gpu }}-${{ env.EMULATOR_VERSION }}
 
       - name: Create the emulator snapshot
         if: steps.avd.outputs.cache-hit != 'true'
@@ -213,9 +229,10 @@ jobs:
           api-level: ${{ inputs.api-level }}
           target: google_apis
           arch: x86_64
-          profile: pixel_6
+          profile: ${{ inputs.profile }}
+          cores: ${{ inputs.cores }}
           force-avd-creation: false
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          emulator-options: -no-window -gpu ${{ inputs.gpu }} -noaudio -no-boot-anim -camera-back none
           disable-animations: false
           script: echo "Created the emulator snapshot"
 
@@ -234,11 +251,39 @@ jobs:
           api-level: ${{ inputs.api-level }}
           target: google_apis
           arch: x86_64
-          profile: pixel_6
+          profile: ${{ inputs.profile }}
+          cores: ${{ inputs.cores }}
           force-avd-creation: false
-          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          emulator-options: -no-snapshot-save -no-window -gpu ${{ inputs.gpu }} -noaudio -no-boot-anim -camera-back none
           disable-animations: false
           script: dart run tool/mock_x/emulator_qa.dart apk/app-profile.apk "$FLOWS" emulator-output
+        env:
+          SCREENRECORD_ARGS: ${{ inputs.screenrecord }}
+
+      # screenrecord writes a frame only when the screen changes, so a gap of more than half a second
+      # between two frames is a still screen, which counts neither as frames nor as time
+      - name: Measure the frame rate of the videos while the screen moves
+        if: always()
+        run: |
+          shopt -s nullglob
+          {
+            echo '```'
+            echo "profile=$PROFILE cores=$CORES gpu=$GPU api=$API screenrecord=$SCREENRECORD"
+            for video in emulator-output/raw/*.mp4; do
+              ffprobe -v error -select_streams v:0 -show_entries frame=pts_time -of csv=p=0 "$video" |
+                awk -v name="$(basename "$video")" '
+                  NR > 1 { gap = $1 - previous; if (gap < 0.5) { moving += gap; frames++ } }
+                  { previous = $1 }
+                  END { printf "%-24s %5.1f fps (%d frames over %.1f s)\n", name, moving ? frames / moving : 0, frames, moving }'
+            done
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+        env:
+          PROFILE: ${{ inputs.profile }}
+          CORES: ${{ inputs.cores }}
+          GPU: ${{ inputs.gpu }}
+          API: ${{ inputs.api-level }}
+          SCREENRECORD: ${{ inputs.screenrecord }}
 
       - name: Archive the videos and logs
         if: always()
